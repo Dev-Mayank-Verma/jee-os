@@ -10,18 +10,28 @@ const list = (body) => {
   return [];
 };
 const objectData = (body) => body && body.data && !Array.isArray(body.data) ? body.data : (body || {});
+const pathEnv = (name, fallback) => process.env[name] || fallback;
+const pwPath = {
+  details: () => pathEnv("PW_BATCH_PATH", "/v3/batches/{batchId}/details"),
+  schedule: () => "/v1/batches/{batchId}/todays-schedule?isNewStudyMaterialFlow=true",
+  topics: () => "/v2/batches/{batchId}/subject/{subjectId}/topics?page={page}",
+  contents: () => "/v2/batches/{batchId}/subject/{subjectId}/contents?tag={tag}&contentType={contentType}&page={page}",
+  tests: () => "/v3/test-service/tests?testType=All&testStatus=All&attemptStatus=All&batchId={batchId}&isSubjective=false&categoryId={categoryId}&categorySectionId={categorySectionId}&isPurchased={isPurchased}",
+};
+const json = (body) => JSON.stringify(body || {});
+const searchPath = () => process.env.PW_SEARCH_PATH || "https://pwthor.live/api/searchBatch?name={q}&page={page}";
 
 async function get(path) {
-  const base = (process.env.PW_API_BASE || "").replace(/\/$/, "");
-  if (!base) { const e = new Error("PW_API_BASE set nahi hai (Vercel env me API ka base link daalo)"); e.status = 503; throw e; }
-  let h = {};
-  try { h = JSON.parse(process.env.PW_API_HEADERS || "{}"); } catch (e) {
+  const base = (process.env.PW_API_BASE || "https://proxy.streamvideo.co.in/fetch/api.penpencil.co").replace(/\/$/, "");
+  const url = /^https?:\/\//i.test(path) ? path : base + (path.startsWith("/") ? path : "/" + path);
+  let h = { accept: "application/json", "client-id": "5eb393ee95fab7468a79d189", "client-type": "WEB", "client-version": "2.2.7", origin: "https://www.pw.live", referer: "https://www.pw.live/" };
+  try { h = Object.assign(h, JSON.parse(process.env.PW_API_HEADERS || "{}")); } catch (e) {
     const err = new Error("PW_API_HEADERS valid JSON nahi hai"); err.status = 503; throw err;
   }
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), 15000);
   try {
-    const r = await fetch(base + path, { headers: Object.assign({ accept: "application/json" }, h), signal: ac.signal });
+    const r = await fetch(url, { headers: h, signal: ac.signal });
     if (!r.ok) {
       const upstream = await r.text().catch(() => "");
       let detail = "";
@@ -56,16 +66,25 @@ module.exports = wrap(async (req, res) => {
       if (process.env.PW_SEARCH_FILTER === "1") data = data.filter((b) => b.batchName.toLowerCase().includes(q.toLowerCase()));
       return res.json({ data: data.slice(0, 30) });
     }
+    if (["schedule", "topics", "contents", "tests"].includes(op)) {
+      const batchId = String(req.query.batchId || "").trim();
+      if (!/^[A-Za-z0-9_-]{3,100}$/.test(batchId)) return res.status(400).json({ error: "Batch ID galat hai" });
+      const args = { batchId, subjectId: String(req.query.subjectId || ""), tag: String(req.query.tag || ""), contentType: String(req.query.contentType || "notes"), page: parseInt(req.query.page) || 1, categoryId: String(req.query.categoryId || ""), categorySectionId: String(req.query.categorySectionId || "Other_Tests"), isPurchased: String(req.query.isPurchased || "true") };
+      const route = op === "schedule" ? pwPath.schedule() : op === "topics" ? pwPath.topics() : op === "contents" ? pwPath.contents() : pwPath.tests();
+      if ((op === "topics" || op === "contents") && !args.subjectId) return res.status(400).json({ error: "Subject ID zaroori hai" });
+      return res.json({ data: await get(T(route, args)) });
+    }
     if (op === "build") {
       const batchId = String(req.query.batchId || "").trim();
       if (!/^[A-Za-z0-9_-]{3,100}$/.test(batchId)) return res.status(400).json({ error: "Batch ID galat hai" });
-      const bi = await get(T(process.env.PW_BATCH_PATH || "/api/BatchInfo?BatchId={batchId}&Type=details", { batchId }));
+      const bi = await get(T(pwPath.details(), { batchId }));
       const d = objectData(bi);
       const subs = list(d.subjects || d).filter((s) => !s.isResources && s.slug);
       const groups = {};
       await Promise.all(subs.map(async (s) => {
         try {
-          const sj = await get(T(process.env.PW_SUBJECT_PATH || "/api/SubjectInfo?BatchId={batchId}&SubjectId={subjectId}&page=1", { batchId, subjectId: s.slug }));
+          const subjectPath = process.env.PW_SUBJECT_PATH && !process.env.PW_SUBJECT_PATH.includes("SubjectInfo") ? process.env.PW_SUBJECT_PATH : pwPath.topics();
+          const sj = await get(T(subjectPath, { batchId, subjectId: s.slug, page: 1 }));
           const ch = {};
           list(sj).forEach((t) => {
             const v = +t.videos || 0, x = +t.exercises || 0;
