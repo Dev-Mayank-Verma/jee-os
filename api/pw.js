@@ -1,18 +1,31 @@
 const { sql, user, wrap } = require("./_lib");
 
 const T = (p, o) => p.replace(/\{(\w+)\}/g, (m, k) => encodeURIComponent(o[k] == null ? "" : o[k]));
+const list = (body) => {
+  if (Array.isArray(body)) return body;
+  if (Array.isArray(body && body.data)) return body.data;
+  if (Array.isArray(body && body.data && body.data.data)) return body.data.data;
+  if (Array.isArray(body && body.results)) return body.results;
+  if (Array.isArray(body && body.items)) return body.items;
+  return [];
+};
+const objectData = (body) => body && body.data && !Array.isArray(body.data) ? body.data : (body || {});
 
 async function get(path) {
   const base = (process.env.PW_API_BASE || "").replace(/\/$/, "");
   if (!base) { const e = new Error("PW_API_BASE set nahi hai (Vercel env me API ka base link daalo)"); e.status = 503; throw e; }
   let h = {};
-  try { h = JSON.parse(process.env.PW_API_HEADERS || "{}"); } catch (e) {}
+  try { h = JSON.parse(process.env.PW_API_HEADERS || "{}"); } catch (e) {
+    const err = new Error("PW_API_HEADERS valid JSON nahi hai"); err.status = 503; throw err;
+  }
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), 15000);
   try {
     const r = await fetch(base + path, { headers: Object.assign({ accept: "application/json" }, h), signal: ac.signal });
     if (!r.ok) { const e = new Error("PW API error " + r.status); e.status = 502; throw e; }
-    return await r.json();
+    const body = await r.json();
+    if (!body || typeof body !== "object") { const e = new Error("PW API ne JSON object nahi bheja"); e.status = 502; throw e; }
+    return body;
   } catch (e) {
     if (!e.status) { e.status = 502; e.message = "PW API se connect nahi hua: " + e.message; }
     throw e;
@@ -29,7 +42,7 @@ module.exports = wrap(async (req, res) => {
       const page = parseInt(req.query.page) || 1;
       if (!q) return res.status(400).json({ error: "Keyword daalo" });
       const j = await get(T(process.env.PW_SEARCH_PATH || "/api/AllBatches?page={page}&search={q}", { q, page }));
-      let data = (Array.isArray(j.data) ? j.data : []).map((b) => ({
+      let data = list(j).map((b) => ({
         batchId: b.batchId || b._id, batchName: b.batchName || b.name, batchImage: b.batchImage || "",
         startDate: b.startDate || "", endDate: b.endDate || "", batchPrice: b.batchPrice, byName: b.byName || "",
       })).filter((b) => b.batchId && b.batchName);
@@ -38,16 +51,16 @@ module.exports = wrap(async (req, res) => {
     }
     if (op === "build") {
       const batchId = String(req.query.batchId || "").trim();
-      if (!/^[a-f0-9]{8,40}$/i.test(batchId)) return res.status(400).json({ error: "Batch ID galat hai" });
+      if (!/^[A-Za-z0-9_-]{3,100}$/.test(batchId)) return res.status(400).json({ error: "Batch ID galat hai" });
       const bi = await get(T(process.env.PW_BATCH_PATH || "/api/BatchInfo?BatchId={batchId}&Type=details", { batchId }));
-      const d = bi.data || {};
-      const subs = (d.subjects || []).filter((s) => !s.isResources && s.slug);
+      const d = objectData(bi);
+      const subs = list(d.subjects || d).filter((s) => !s.isResources && s.slug);
       const groups = {};
       await Promise.all(subs.map(async (s) => {
         try {
           const sj = await get(T(process.env.PW_SUBJECT_PATH || "/api/SubjectInfo?BatchId={batchId}&SubjectId={subjectId}&page=1", { batchId, subjectId: s.slug }));
           const ch = {};
-          (sj.data || []).forEach((t) => {
+          list(sj).forEach((t) => {
             const v = +t.videos || 0, x = +t.exercises || 0;
             if (!v && !x) return;
             ch[String(t.name).trim()] = { lt: v, dt: x, notes: +t.notes || 0 };
