@@ -22,7 +22,14 @@ async function get(path) {
   const t = setTimeout(() => ac.abort(), 15000);
   try {
     const r = await fetch(base + path, { headers: Object.assign({ accept: "application/json" }, h), signal: ac.signal });
-    if (!r.ok) { const e = new Error("PW API error " + r.status); e.status = 502; throw e; }
+    if (!r.ok) {
+      const upstream = await r.text().catch(() => "");
+      let detail = "";
+      try { detail = JSON.parse(upstream).message || JSON.parse(upstream).error || ""; } catch (e) {}
+      const err = new Error("PW API error " + r.status + (detail ? ": " + detail : ""));
+      err.status = r.status === 401 || r.status === 403 ? r.status : 502;
+      throw err;
+    }
     const body = await r.json();
     if (!body || typeof body !== "object") { const e = new Error("PW API ne JSON object nahi bheja"); e.status = 502; throw e; }
     return body;
